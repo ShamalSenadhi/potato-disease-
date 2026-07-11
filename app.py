@@ -5,7 +5,6 @@ from PIL import Image
 from datetime import datetime
 import pandas as pd
 import os
-import traceback
 
 # ===========================================================
 # Page configuration
@@ -22,23 +21,16 @@ st.set_page_config(
 # ===========================================================
 IMAGE_SIZE = 256
 CLASS_NAMES = ['Bacteria', 'Fungi', 'Healthy', 'Nematode', 'Pest', 'Phytopthora', 'Virus']
+MODEL_PATH = "mobilenet_v2_model_v1.keras"
+MODEL_DISPLAY_NAME = "MobileNetV2 (Transfer Learning)"
 
-# Map of available models -> local file path
-# Update these paths/filenames to match whatever you actually uploaded to the repo
-MODEL_PATHS = {
-    "Custom CNN": "cnn_model_v1.keras",
-    "VGG16 (Transfer Learning)": "vgg16_model_v1.keras",
-    "MobileNetV2 (Transfer Learning)": "mobilenet_v2_model_v1.keras",
-}
-
-# Recorded test-set results from model evaluation (update if you re-train)
+# Recorded test-set results from model evaluation during development
+# (shown on the About page for context on why this model was chosen)
 MODEL_RESULTS = {
     "Custom CNN": 54.41,
-    "VGG16 (Transfer Learning)": 69.28,
-    "MobileNetV2 (Transfer Learning)": 81.37,
+    "VGG16": 69.28,
+    "MobileNetV2": 81.37,
 }
-
-COMPARISON_CSV_PATH = "model_comparison_results.csv"
 
 # ===========================================================
 # Disease knowledge base
@@ -168,53 +160,32 @@ DISEASE_INFO = {
 }
 
 # ===========================================================
-# Model loading with validation — never crashes the whole app.
-# Cached per model path so each is only loaded once per session.
+# Load model (cached so it only loads once per session)
 # ===========================================================
 @st.cache_resource(show_spinner=False)
-def _load_model_cached(model_path):
-    return tf.keras.models.load_model(model_path)
+def load_model():
+    return tf.keras.models.load_model(MODEL_PATH)
 
-def safe_load_model(name, path):
-    """
-    Attempt to load a model. Returns (model, error_message).
-    error_message is None on success.
-    """
-    if not os.path.exists(path):
-        return None, f"File not found: `{path}`. Make sure it's uploaded to the app folder."
+model_load_error = None
+model = None
+if os.path.exists(MODEL_PATH):
     try:
-        model = _load_model_cached(path)
-        return model, None
+        model = load_model()
     except Exception as e:
-        return None, f"Failed to load `{path}`: {e}"
-
-def validate_all_models():
-    """
-    Check every configured model without necessarily loading it into memory
-    long-term (loading is still cached, so this is a one-time cost).
-    Returns dict: name -> {"status": "ok"/"error", "detail": str or None}
-    """
-    status = {}
-    for name, path in MODEL_PATHS.items():
-        model, error = safe_load_model(name, path)
-        if error:
-            status[name] = {"status": "error", "detail": error}
-        else:
-            status[name] = {"status": "ok", "detail": None}
-    return status
+        model_load_error = str(e)
+else:
+    model_load_error = f"Model file '{MODEL_PATH}' not found in the app folder."
 
 # ===========================================================
-# Session state
+# Session state for history
 # ===========================================================
 if "history" not in st.session_state:
     st.session_state.history = []
-if "model_status" not in st.session_state:
-    st.session_state.model_status = None
 
 # ===========================================================
 # Prediction function
 # ===========================================================
-def predict(model, image: Image.Image):
+def predict(image: Image.Image):
     img = image.convert("RGB").resize((IMAGE_SIZE, IMAGE_SIZE))
     img_array = tf.keras.utils.img_to_array(img)
     img_array = tf.expand_dims(img_array, 0)
@@ -229,99 +200,98 @@ def predict(model, image: Image.Image):
 # Sidebar navigation
 # ===========================================================
 st.sidebar.title("🥔 Potato Disease Detector")
-page = st.sidebar.radio(
-    "Navigate",
-    ["🔍 Detect Disease", "✅ Model Validation", "⚖️ Model Comparison", "📚 Disease Library", "📊 Session History", "ℹ️ About"]
-)
+page = st.sidebar.radio("Navigate", ["🔍 Detect Disease", "📚 Disease Library", "📊 Session History", "ℹ️ About"])
 
 st.sidebar.markdown("---")
+st.sidebar.caption(f"Model: {MODEL_DISPLAY_NAME}")
+st.sidebar.caption(f"Test accuracy: {MODEL_RESULTS['MobileNetV2']}%")
 st.sidebar.caption(f"Classes: {', '.join(CLASS_NAMES)}")
+
+if model_load_error:
+    st.sidebar.error(f"⚠️ Model not loaded: {model_load_error}")
 
 # ===========================================================
 # PAGE 1: Detect Disease
 # ===========================================================
 if page == "🔍 Detect Disease":
     st.title("🔍 Detect Potato Leaf Disease")
-    st.write("Upload a photo of a potato leaf. Choose a model to run the prediction, "
-             "or check the **Model Validation** page first if you're unsure which models are working.")
+    st.write("Upload a photo of a potato leaf to identify whether it's healthy or affected by a disease, "
+             "along with recommended treatment and prevention steps.")
+    st.caption(f"Powered by {MODEL_DISPLAY_NAME} — {MODEL_RESULTS['MobileNetV2']}% test accuracy")
 
-    working_models = {name: path for name, path in MODEL_PATHS.items() if os.path.exists(path)}
-
-    if not working_models:
-        st.error("No model files were found in the app folder. Check the **Model Validation** page for details.")
+    if model_load_error:
+        st.error(f"The model could not be loaded: {model_load_error}\n\n"
+                 f"Make sure `{MODEL_PATH}` is present in the app folder.")
     else:
-        selected_model_name = st.selectbox("Choose model", list(working_models.keys()))
         uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
 
         if uploaded_file is not None:
             image = Image.open(uploaded_file)
 
             col1, col2 = st.columns([1, 1.3])
+
             with col1:
                 st.image(image, caption="Uploaded Image", use_container_width=True)
 
-            with st.spinner(f"Loading {selected_model_name}..."):
-                model, error = safe_load_model(selected_model_name, working_models[selected_model_name])
+            with st.spinner("Analysing leaf..."):
+                predicted_class, confidence, all_scores = predict(image)
 
-            if error:
-                st.error(f"⚠️ Could not use this model: {error}")
-                st.info("Try a different model, or check the **Model Validation** page for details on what went wrong.")
-            else:
-                with st.spinner("Analysing leaf..."):
-                    predicted_class, confidence, all_scores = predict(model, image)
+            info = DISEASE_INFO[predicted_class]
 
-                info = DISEASE_INFO[predicted_class]
+            st.session_state.history.append({
+                "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Prediction": predicted_class,
+                "Confidence (%)": confidence,
+                "Severity": info["severity"]
+            })
 
-                st.session_state.history.append({
-                    "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Model": selected_model_name,
-                    "Prediction": predicted_class,
-                    "Confidence (%)": confidence,
-                    "Severity": info["severity"]
-                })
+            with col2:
+                st.subheader(f"{info['icon']} Prediction: {predicted_class}")
 
-                with col2:
-                    st.subheader(f"{info['icon']} Prediction: {predicted_class}")
-                    st.caption(f"Model used: {selected_model_name}")
+                if predicted_class == "Healthy":
+                    st.success(f"**Confidence: {confidence}%**")
+                else:
+                    st.error(f"**Confidence: {confidence}%**  |  Severity: **{info['severity']}**")
 
-                    if predicted_class == "Healthy":
-                        st.success(f"**Confidence: {confidence}%**")
-                    else:
-                        st.error(f"**Confidence: {confidence}%**  |  Severity: **{info['severity']}**")
+                st.write(info["description"])
 
-                    st.write(info["description"])
+                st.markdown("**Confidence breakdown across all classes**")
+                df_scores = pd.DataFrame({"Class": list(all_scores.keys()), "Confidence (%)": list(all_scores.values())})
+                st.bar_chart(df_scores.set_index("Class"))
 
-                    st.markdown("**Confidence breakdown across all classes**")
-                    df_scores = pd.DataFrame({"Class": list(all_scores.keys()), "Confidence (%)": list(all_scores.values())})
-                    st.bar_chart(df_scores.set_index("Class"))
+            st.markdown("---")
 
-                st.markdown("---")
-                tab1, tab2, tab3 = st.tabs(["🩺 Symptoms & Causes", "💊 Treatment", "🛡️ Prevention"])
-                with tab1:
-                    if info["symptoms"]:
-                        st.markdown("**Common symptoms:**")
-                        for s in info["symptoms"]:
-                            st.markdown(f"- {s}")
-                    if info["causes"]:
-                        st.markdown("**Causes:**")
-                        for c in info["causes"]:
-                            st.markdown(f"- {c}")
-                    if not info["symptoms"] and not info["causes"]:
-                        st.write("No disease symptoms detected.")
-                with tab2:
-                    st.markdown("**Recommended actions:**")
-                    for t in info["treatment"]:
-                        st.markdown(f"- {t}")
-                with tab3:
-                    st.markdown("**How to prevent this in future:**")
-                    for p in info["prevention"]:
-                        st.markdown(f"- {p}")
+            tab1, tab2, tab3 = st.tabs(["🩺 Symptoms & Causes", "💊 Treatment", "🛡️ Prevention"])
 
-                if predicted_class != "Healthy":
-                    st.warning("⚠️ This prediction is for guidance only. For confirmed diagnosis and treatment, "
-                               "consult a local agricultural extension officer or plant pathologist.")
+            with tab1:
+                if info["symptoms"]:
+                    st.markdown("**Common symptoms:**")
+                    for s in info["symptoms"]:
+                        st.markdown(f"- {s}")
+                if info["causes"]:
+                    st.markdown("**Causes:**")
+                    for c in info["causes"]:
+                        st.markdown(f"- {c}")
+                if not info["symptoms"] and not info["causes"]:
+                    st.write("No disease symptoms detected.")
+
+            with tab2:
+                st.markdown("**Recommended actions:**")
+                for t in info["treatment"]:
+                    st.markdown(f"- {t}")
+
+            with tab3:
+                st.markdown("**How to prevent this in future:**")
+                for p in info["prevention"]:
+                    st.markdown(f"- {p}")
+
+            if predicted_class != "Healthy":
+                st.warning("⚠️ This prediction is for guidance only. For confirmed diagnosis and treatment, "
+                           "consult a local agricultural extension officer or plant pathologist.")
+
         else:
             st.info("👆 Upload an image to get started.")
+
             with st.expander("💡 Tips for best results"):
                 st.markdown("""
                 - Use a clear, well-lit photo of a single leaf.
@@ -331,89 +301,7 @@ if page == "🔍 Detect Disease":
                 """)
 
 # ===========================================================
-# PAGE 2: Model Validation
-# ===========================================================
-elif page == "✅ Model Validation":
-    st.title("✅ Model Validation")
-    st.write("Checks whether each configured model file exists and loads correctly. "
-             "Run this after deploying or updating model files to confirm everything works.")
-
-    if st.button("🔄 Run validation check"):
-        with st.spinner("Checking all models..."):
-            st.session_state.model_status = validate_all_models()
-
-    if st.session_state.model_status is None:
-        st.info("Click **Run validation check** to test all configured models.")
-    else:
-        for name, path in MODEL_PATHS.items():
-            result = st.session_state.model_status.get(name, {"status": "unknown", "detail": None})
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                if result["status"] == "ok":
-                    st.success("✅ OK")
-                else:
-                    st.error("❌ Failed")
-            with col2:
-                st.markdown(f"**{name}**  \n`{path}`")
-                if result["detail"]:
-                    with st.expander("Show error details"):
-                        st.code(result["detail"])
-
-        st.markdown("---")
-        n_ok = sum(1 for r in st.session_state.model_status.values() if r["status"] == "ok")
-        n_total = len(st.session_state.model_status)
-        if n_ok == n_total:
-            st.success(f"All {n_total} models loaded successfully.")
-        elif n_ok == 0:
-            st.error("No models loaded successfully. Check file paths and formats.")
-        else:
-            st.warning(f"{n_ok} of {n_total} models loaded successfully. "
-                       "Failed models are excluded from the Detect Disease page automatically.")
-
-        with st.expander("💡 Common causes of load failures"):
-            st.markdown("""
-            - **File not found** — the `.keras` file wasn't pushed to the repo, or the filename doesn't match `MODEL_PATHS` in the code.
-            - **Format mismatch** — a model saved as `.h5` with an incompatible Keras version. Re-save using `model.save("name.keras")` (native Keras 3 format) rather than `.h5`.
-            - **Corrupted upload** — the file was only partially uploaded (check its size on GitHub matches what you expect).
-            - **Custom objects/layers** — if the model uses a custom Lambda layer (e.g. `preprocess_input`) that isn't recognised at load time, you may need to pass `custom_objects` to `load_model()`.
-            """)
-
-# ===========================================================
-# PAGE 3: Model Comparison
-# ===========================================================
-elif page == "⚖️ Model Comparison":
-    st.title("⚖️ Model Comparison")
-    st.write("Performance comparison across the three candidate architectures evaluated for this project.")
-
-    if os.path.exists(COMPARISON_CSV_PATH):
-        metrics_df = pd.read_csv(COMPARISON_CSV_PATH, index_col=0)
-        st.dataframe(metrics_df, use_container_width=True)
-    else:
-        results_df = pd.DataFrame({
-            "Model": list(MODEL_RESULTS.keys()),
-            "Test Accuracy (%)": list(MODEL_RESULTS.values())
-        }).set_index("Model")
-        st.bar_chart(results_df)
-        st.dataframe(results_df, use_container_width=True)
-        st.caption(f"Loaded from recorded evaluation results. Add `{COMPARISON_CSV_PATH}` to the app "
-                   "folder to override with a freshly exported comparison table.")
-
-    st.markdown("---")
-    st.markdown("""
-    ### Architecture summary
-
-    | Model | Approach | Strength | Trade-off |
-    |---|---|---|---|
-    | **Custom CNN** | Trained from scratch | Lightweight, fully interpretable, no external dependencies | Needs more data to generalise well; higher overfitting risk |
-    | **VGG16** | Transfer learning (ImageNet) | Strong pretrained features | Heaviest model — slow to train and deploy |
-    | **MobileNetV2** | Transfer learning (ImageNet) | Best accuracy-to-size trade-off; fast inference | Slightly less expressive than deeper networks like VGG16 |
-
-    **Recommended for deployment:** MobileNetV2 achieved the highest test accuracy (81.37%) while
-    remaining lightweight enough for fast, responsive predictions.
-    """)
-
-# ===========================================================
-# PAGE 4: Disease Library
+# PAGE 2: Disease Library
 # ===========================================================
 elif page == "📚 Disease Library":
     st.title("📚 Potato Disease Library")
@@ -422,6 +310,7 @@ elif page == "📚 Disease Library":
     for disease, info in DISEASE_INFO.items():
         with st.expander(f"{info['icon']} {disease}  —  Severity: {info['severity']}"):
             st.write(info["description"])
+
             col1, col2 = st.columns(2)
             with col1:
                 if info["symptoms"]:
@@ -441,7 +330,7 @@ elif page == "📚 Disease Library":
                     st.markdown(f"- {p}")
 
 # ===========================================================
-# PAGE 5: Session History
+# PAGE 3: Session History
 # ===========================================================
 elif page == "📊 Session History":
     st.title("📊 Session Prediction History")
@@ -452,18 +341,13 @@ elif page == "📊 Session History":
         df_history = pd.DataFrame(st.session_state.history)
         st.dataframe(df_history, use_container_width=True)
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         col1.metric("Total scans", len(df_history))
         col2.metric("Healthy detections", int((df_history["Prediction"] == "Healthy").sum()))
         col3.metric("Disease detections", int((df_history["Prediction"] != "Healthy").sum()))
-        col4.metric("Models used", df_history["Model"].nunique() if "Model" in df_history.columns else 1)
 
         st.markdown("**Detections by class**")
         st.bar_chart(df_history["Prediction"].value_counts())
-
-        if "Model" in df_history.columns:
-            st.markdown("**Scans by model**")
-            st.bar_chart(df_history["Model"].value_counts())
 
         csv = df_history.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Download history as CSV", csv, "prediction_history.csv", "text/csv")
@@ -473,28 +357,38 @@ elif page == "📊 Session History":
             st.rerun()
 
 # ===========================================================
-# PAGE 6: About
+# PAGE 4: About
 # ===========================================================
 elif page == "ℹ️ About":
     st.title("ℹ️ About this project")
-    st.markdown("""
-    This dashboard uses three Convolutional Neural Network architectures — a **Custom CNN**,
-    **VGG16** (transfer learning), and **MobileNetV2** (transfer learning) — to classify potato
-    leaf images into **7 categories**: Bacteria, Fungi, Healthy, Nematode, Pest, Phytophthora, and Virus.
+    st.markdown(f"""
+    This dashboard uses a **{MODEL_DISPLAY_NAME}** Convolutional Neural Network, trained with
+    TensorFlow/Keras, to classify potato leaf images into **7 categories**: Bacteria, Fungi,
+    Healthy, Nematode, Pest, Phytophthora, and Virus.
 
     **How it works**
-    1. Check the **Model Validation** page to confirm which models are working.
-    2. Upload a photo of a potato leaf on the **Detect Disease** page.
-    3. Choose a model to run the prediction.
-    4. The image is resized to 256×256 pixels and passed through the selected model.
-    5. The model outputs a predicted class along with a confidence score.
-    6. The dashboard provides relevant symptoms, causes, treatment, and prevention guidance
+    1. Upload a photo of a potato leaf.
+    2. The image is resized to 256×256 pixels and passed through the trained model.
+    3. The model outputs a predicted class along with a confidence score.
+    4. The dashboard provides relevant symptoms, causes, treatment, and prevention guidance
        based on the prediction.
 
-    **Why validate models separately?**
-    Model files can fail to load for reasons like format mismatches or incomplete uploads.
-    Rather than letting one broken file crash the entire app, this dashboard checks each model
-    independently and only offers the ones that load successfully.
+    **Why MobileNetV2?**
+    Three architectures were evaluated on the same test set during development:
+    """)
+
+    results_df = pd.DataFrame({
+        "Model": list(MODEL_RESULTS.keys()),
+        "Test Accuracy (%)": list(MODEL_RESULTS.values())
+    }).set_index("Model")
+
+    st.bar_chart(results_df)
+    st.dataframe(results_df, use_container_width=True)
+
+    st.markdown("""
+    MobileNetV2 achieved the highest test accuracy while remaining lightweight enough for fast,
+    responsive predictions in this dashboard — making it the clear choice for deployment over the
+    Custom CNN and VGG16 alternatives.
 
     **Disclaimer**
     This tool is intended to assist with preliminary screening only and should not replace
