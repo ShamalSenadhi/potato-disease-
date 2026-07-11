@@ -17,7 +17,7 @@ st.set_page_config(
 # ---------------------------------------------------------
 IMAGE_SIZE = 256
 CLASS_NAMES = ['Bacteria', 'Fungi', 'Healthy', 'Nematode', 'Pest', 'Phytopthora', 'Virus']
-MODEL_PATH = "mobilenet_v2_model_v1"   
+MODEL_PATH = "mobilenet_v2_model_v1.keras"   
 
 DISEASE_INFO = {
     "Bacteria": "Caused by bacteria entering through wounds or natural openings. Common symptoms: leaf spots, blights, cankers, wilts.",
