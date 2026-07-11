@@ -174,7 +174,11 @@ if os.path.exists(MODEL_PATH):
     except Exception as e:
         model_load_error = str(e)
 else:
-    model_load_error = f"Model file '{MODEL_PATH}' not found in the app folder."
+    files_in_dir = os.listdir(".")
+    model_load_error = (
+        f"Model file '{MODEL_PATH}' not found in the app folder.\n\n"
+        f"Files actually present in the working directory: {files_in_dir}"
+    )
 
 # ===========================================================
 # Session state for history
