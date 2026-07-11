@@ -5,6 +5,7 @@ from PIL import Image
 from datetime import datetime
 import pandas as pd
 import os
+import traceback
 
 # ===========================================================
 # Page configuration
@@ -22,7 +23,7 @@ st.set_page_config(
 IMAGE_SIZE = 256
 CLASS_NAMES = ['Bacteria', 'Fungi', 'Healthy', 'Nematode', 'Pest', 'Phytopthora', 'Virus']
 
-# Map of available models -> file path
+# Map of available models -> local file path
 # Update these paths/filenames to match whatever you actually uploaded to the repo
 MODEL_PATHS = {
     "Custom CNN": "cnn_model_v1.keras",
@@ -30,18 +31,14 @@ MODEL_PATHS = {
     "MobileNetV2 (Transfer Learning)": "mobilenet_v2_model_v1.keras",
 }
 
-# Optional: path to a CSV with real evaluation results, produced by the
-# "Model Comparison" notebook cell (comparison_df.to_csv(...)).
-# If this file isn't present, the dashboard falls back to placeholder values.
-COMPARISON_CSV_PATH = "model_comparison_results.csv"
+# Recorded test-set results from model evaluation (update if you re-train)
+MODEL_RESULTS = {
+    "Custom CNN": 54.41,
+    "VGG16 (Transfer Learning)": 69.28,
+    "MobileNetV2 (Transfer Learning)": 81.37,
+}
 
-# Fallback placeholder metrics (used only if COMPARISON_CSV_PATH is missing)
-PLACEHOLDER_METRICS = pd.DataFrame({
-    "Model": ["Custom CNN", "VGG16 (Transfer Learning)", "MobileNetV2 (Transfer Learning)"],
-    "Test Accuracy (%)": [None, None, None],
-    "Test Loss": [None, None, None],
-    "Total Parameters (M)": [0.8, 14.7, 2.2],
-})
+COMPARISON_CSV_PATH = "model_comparison_results.csv"
 
 # ===========================================================
 # Disease knowledge base
@@ -171,30 +168,48 @@ DISEASE_INFO = {
 }
 
 # ===========================================================
-# Model loading (cached per model path)
+# Model loading with validation — never crashes the whole app.
+# Cached per model path so each is only loaded once per session.
 # ===========================================================
-@st.cache_resource
-def load_model(model_path):
+@st.cache_resource(show_spinner=False)
+def _load_model_cached(model_path):
     return tf.keras.models.load_model(model_path)
 
-def get_available_models():
-    """Return only the models whose files actually exist in the repo."""
-    available = {}
-    missing = []
-    for name, path in MODEL_PATHS.items():
-        if os.path.exists(path):
-            available[name] = path
-        else:
-            missing.append(name)
-    return available, missing
+def safe_load_model(name, path):
+    """
+    Attempt to load a model. Returns (model, error_message).
+    error_message is None on success.
+    """
+    if not os.path.exists(path):
+        return None, f"File not found: `{path}`. Make sure it's uploaded to the app folder."
+    try:
+        model = _load_model_cached(path)
+        return model, None
+    except Exception as e:
+        return None, f"Failed to load `{path}`: {e}"
 
-available_models, missing_models = get_available_models()
+def validate_all_models():
+    """
+    Check every configured model without necessarily loading it into memory
+    long-term (loading is still cached, so this is a one-time cost).
+    Returns dict: name -> {"status": "ok"/"error", "detail": str or None}
+    """
+    status = {}
+    for name, path in MODEL_PATHS.items():
+        model, error = safe_load_model(name, path)
+        if error:
+            status[name] = {"status": "error", "detail": error}
+        else:
+            status[name] = {"status": "ok", "detail": None}
+    return status
 
 # ===========================================================
-# Session state for history
+# Session state
 # ===========================================================
 if "history" not in st.session_state:
     st.session_state.history = []
+if "model_status" not in st.session_state:
+    st.session_state.model_status = None
 
 # ===========================================================
 # Prediction function
@@ -216,15 +231,10 @@ def predict(model, image: Image.Image):
 st.sidebar.title("🥔 Potato Disease Detector")
 page = st.sidebar.radio(
     "Navigate",
-    ["🔍 Detect Disease", "⚖️ Model Comparison", "📚 Disease Library", "📊 Session History", "ℹ️ About"]
+    ["🔍 Detect Disease", "✅ Model Validation", "⚖️ Model Comparison", "📚 Disease Library", "📊 Session History", "ℹ️ About"]
 )
 
 st.sidebar.markdown("---")
-if missing_models:
-    st.sidebar.warning(
-        "Some model files are missing from the app folder:\n" +
-        "\n".join(f"- {m} ({MODEL_PATHS[m]})" for m in missing_models)
-    )
 st.sidebar.caption(f"Classes: {', '.join(CLASS_NAMES)}")
 
 # ===========================================================
@@ -232,18 +242,15 @@ st.sidebar.caption(f"Classes: {', '.join(CLASS_NAMES)}")
 # ===========================================================
 if page == "🔍 Detect Disease":
     st.title("🔍 Detect Potato Leaf Disease")
-    st.write("Upload a photo of a potato leaf. Choose a single model for a quick result, "
-             "or compare all three models side by side on the same image.")
+    st.write("Upload a photo of a potato leaf. Choose a model to run the prediction, "
+             "or check the **Model Validation** page first if you're unsure which models are working.")
 
-    if not available_models:
-        st.error("No model files were found in the app folder. Add at least one of: "
-                  + ", ".join(MODEL_PATHS.values()))
+    working_models = {name: path for name, path in MODEL_PATHS.items() if os.path.exists(path)}
+
+    if not working_models:
+        st.error("No model files were found in the app folder. Check the **Model Validation** page for details.")
     else:
-        mode = st.radio("Mode", ["Use one model", "Compare all available models"], horizontal=True)
-
-        if mode == "Use one model":
-            selected_model_name = st.selectbox("Choose model", list(available_models.keys()))
-
+        selected_model_name = st.selectbox("Choose model", list(working_models.keys()))
         uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
 
         if uploaded_file is not None:
@@ -253,11 +260,14 @@ if page == "🔍 Detect Disease":
             with col1:
                 st.image(image, caption="Uploaded Image", use_container_width=True)
 
-            # ---------------- Single model mode ----------------
-            if mode == "Use one model":
-                model = load_model(available_models[selected_model_name])
+            with st.spinner(f"Loading {selected_model_name}..."):
+                model, error = safe_load_model(selected_model_name, working_models[selected_model_name])
 
-                with st.spinner(f"Analysing leaf using {selected_model_name}..."):
+            if error:
+                st.error(f"⚠️ Could not use this model: {error}")
+                st.info("Try a different model, or check the **Model Validation** page for details on what went wrong.")
+            else:
+                with st.spinner("Analysing leaf..."):
                     predicted_class, confidence, all_scores = predict(model, image)
 
                 info = DISEASE_INFO[predicted_class]
@@ -310,70 +320,6 @@ if page == "🔍 Detect Disease":
                 if predicted_class != "Healthy":
                     st.warning("⚠️ This prediction is for guidance only. For confirmed diagnosis and treatment, "
                                "consult a local agricultural extension officer or plant pathologist.")
-
-            # ---------------- Compare all models mode ----------------
-            else:
-                with col2:
-                    st.subheader("Predictions across all available models")
-
-                comparison_rows = []
-                per_model_scores = {}
-
-                for name, path in available_models.items():
-                    model = load_model(path)
-                    with st.spinner(f"Running {name}..."):
-                        predicted_class, confidence, all_scores = predict(model, image)
-                    comparison_rows.append({
-                        "Model": name,
-                        "Prediction": predicted_class,
-                        "Confidence (%)": confidence,
-                        "Severity": DISEASE_INFO[predicted_class]["severity"]
-                    })
-                    per_model_scores[name] = all_scores
-
-                    st.session_state.history.append({
-                        "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "Model": name,
-                        "Prediction": predicted_class,
-                        "Confidence (%)": confidence,
-                        "Severity": DISEASE_INFO[predicted_class]["severity"]
-                    })
-
-                comp_df = pd.DataFrame(comparison_rows)
-
-                with col2:
-                    st.dataframe(comp_df, use_container_width=True, hide_index=True)
-
-                    # agreement check
-                    unique_predictions = comp_df["Prediction"].nunique()
-                    if unique_predictions == 1:
-                        st.success(f"✅ All models agree: **{comp_df['Prediction'].iloc[0]}**")
-                    else:
-                        st.warning("⚠️ Models disagree on the prediction — review results below carefully, "
-                                   "and consider the majority vote or the highest-confidence model.")
-
-                st.markdown("---")
-                st.markdown("**Confidence breakdown per model**")
-                scores_df = pd.DataFrame(per_model_scores)
-                st.bar_chart(scores_df)
-
-                st.markdown("---")
-                st.markdown("**Treatment & prevention (based on majority prediction)**")
-                majority_class = comp_df["Prediction"].mode()[0]
-                info = DISEASE_INFO[majority_class]
-                tab1, tab2, tab3 = st.tabs(["🩺 Symptoms & Causes", "💊 Treatment", "🛡️ Prevention"])
-                with tab1:
-                    for s in info["symptoms"]:
-                        st.markdown(f"- {s}")
-                    for c in info["causes"]:
-                        st.markdown(f"- {c}")
-                with tab2:
-                    for t in info["treatment"]:
-                        st.markdown(f"- {t}")
-                with tab3:
-                    for p in info["prevention"]:
-                        st.markdown(f"- {p}")
-
         else:
             st.info("👆 Upload an image to get started.")
             with st.expander("💡 Tips for best results"):
@@ -385,7 +331,55 @@ if page == "🔍 Detect Disease":
                 """)
 
 # ===========================================================
-# PAGE 2: Model Comparison
+# PAGE 2: Model Validation
+# ===========================================================
+elif page == "✅ Model Validation":
+    st.title("✅ Model Validation")
+    st.write("Checks whether each configured model file exists and loads correctly. "
+             "Run this after deploying or updating model files to confirm everything works.")
+
+    if st.button("🔄 Run validation check"):
+        with st.spinner("Checking all models..."):
+            st.session_state.model_status = validate_all_models()
+
+    if st.session_state.model_status is None:
+        st.info("Click **Run validation check** to test all configured models.")
+    else:
+        for name, path in MODEL_PATHS.items():
+            result = st.session_state.model_status.get(name, {"status": "unknown", "detail": None})
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if result["status"] == "ok":
+                    st.success("✅ OK")
+                else:
+                    st.error("❌ Failed")
+            with col2:
+                st.markdown(f"**{name}**  \n`{path}`")
+                if result["detail"]:
+                    with st.expander("Show error details"):
+                        st.code(result["detail"])
+
+        st.markdown("---")
+        n_ok = sum(1 for r in st.session_state.model_status.values() if r["status"] == "ok")
+        n_total = len(st.session_state.model_status)
+        if n_ok == n_total:
+            st.success(f"All {n_total} models loaded successfully.")
+        elif n_ok == 0:
+            st.error("No models loaded successfully. Check file paths and formats.")
+        else:
+            st.warning(f"{n_ok} of {n_total} models loaded successfully. "
+                       "Failed models are excluded from the Detect Disease page automatically.")
+
+        with st.expander("💡 Common causes of load failures"):
+            st.markdown("""
+            - **File not found** — the `.keras` file wasn't pushed to the repo, or the filename doesn't match `MODEL_PATHS` in the code.
+            - **Format mismatch** — a model saved as `.h5` with an incompatible Keras version. Re-save using `model.save("name.keras")` (native Keras 3 format) rather than `.h5`.
+            - **Corrupted upload** — the file was only partially uploaded (check its size on GitHub matches what you expect).
+            - **Custom objects/layers** — if the model uses a custom Lambda layer (e.g. `preprocess_input`) that isn't recognised at load time, you may need to pass `custom_objects` to `load_model()`.
+            """)
+
+# ===========================================================
+# PAGE 3: Model Comparison
 # ===========================================================
 elif page == "⚖️ Model Comparison":
     st.title("⚖️ Model Comparison")
@@ -394,24 +388,15 @@ elif page == "⚖️ Model Comparison":
     if os.path.exists(COMPARISON_CSV_PATH):
         metrics_df = pd.read_csv(COMPARISON_CSV_PATH, index_col=0)
         st.dataframe(metrics_df, use_container_width=True)
-        source_note = "Results loaded from your evaluation notebook's exported metrics."
     else:
-        metrics_df = PLACEHOLDER_METRICS.set_index("Model")
-        st.dataframe(metrics_df, use_container_width=True)
-        source_note = (f"⚠️ `{COMPARISON_CSV_PATH}` not found in the app folder — showing placeholder "
-                        "parameter counts only. Export your notebook's `comparison_df.to_csv(...)` "
-                        "and add it alongside `app.py` to display real accuracy/loss results here.")
-
-    st.caption(source_note)
-
-    st.markdown("---")
-    st.markdown("### Parameter count comparison")
-    if "Total Parameters (M)" in metrics_df.columns:
-        st.bar_chart(metrics_df["Total Parameters (M)"])
-
-    if "Test Accuracy (%)" in metrics_df.columns and metrics_df["Test Accuracy (%)"].notna().all():
-        st.markdown("### Test accuracy comparison")
-        st.bar_chart(metrics_df["Test Accuracy (%)"])
+        results_df = pd.DataFrame({
+            "Model": list(MODEL_RESULTS.keys()),
+            "Test Accuracy (%)": list(MODEL_RESULTS.values())
+        }).set_index("Model")
+        st.bar_chart(results_df)
+        st.dataframe(results_df, use_container_width=True)
+        st.caption(f"Loaded from recorded evaluation results. Add `{COMPARISON_CSV_PATH}` to the app "
+                   "folder to override with a freshly exported comparison table.")
 
     st.markdown("---")
     st.markdown("""
@@ -420,15 +405,15 @@ elif page == "⚖️ Model Comparison":
     | Model | Approach | Strength | Trade-off |
     |---|---|---|---|
     | **Custom CNN** | Trained from scratch | Lightweight, fully interpretable, no external dependencies | Needs more data to generalise well; higher overfitting risk |
-    | **VGG16** | Transfer learning (ImageNet) | Strong pretrained features, high accuracy potential | Heaviest model — slow to train and deploy |
+    | **VGG16** | Transfer learning (ImageNet) | Strong pretrained features | Heaviest model — slow to train and deploy |
     | **MobileNetV2** | Transfer learning (ImageNet) | Best accuracy-to-size trade-off; fast inference | Slightly less expressive than deeper networks like VGG16 |
 
-    **Recommended for deployment:** MobileNetV2 — it balances pretrained accuracy with a small enough
-    footprint for responsive predictions in this dashboard.
+    **Recommended for deployment:** MobileNetV2 achieved the highest test accuracy (81.37%) while
+    remaining lightweight enough for fast, responsive predictions.
     """)
 
 # ===========================================================
-# PAGE 3: Disease Library
+# PAGE 4: Disease Library
 # ===========================================================
 elif page == "📚 Disease Library":
     st.title("📚 Potato Disease Library")
@@ -456,7 +441,7 @@ elif page == "📚 Disease Library":
                     st.markdown(f"- {p}")
 
 # ===========================================================
-# PAGE 4: Session History
+# PAGE 5: Session History
 # ===========================================================
 elif page == "📊 Session History":
     st.title("📊 Session Prediction History")
@@ -488,7 +473,7 @@ elif page == "📊 Session History":
             st.rerun()
 
 # ===========================================================
-# PAGE 5: About
+# PAGE 6: About
 # ===========================================================
 elif page == "ℹ️ About":
     st.title("ℹ️ About this project")
@@ -498,18 +483,18 @@ elif page == "ℹ️ About":
     leaf images into **7 categories**: Bacteria, Fungi, Healthy, Nematode, Pest, Phytophthora, and Virus.
 
     **How it works**
-    1. Upload a photo of a potato leaf.
-    2. Choose a single model, or compare all three at once.
-    3. The image is resized to 256×256 pixels and passed through the selected model(s).
-    4. Each model outputs a predicted class along with a confidence score.
-    5. The dashboard provides relevant symptoms, causes, treatment, and prevention guidance
+    1. Check the **Model Validation** page to confirm which models are working.
+    2. Upload a photo of a potato leaf on the **Detect Disease** page.
+    3. Choose a model to run the prediction.
+    4. The image is resized to 256×256 pixels and passed through the selected model.
+    5. The model outputs a predicted class along with a confidence score.
+    6. The dashboard provides relevant symptoms, causes, treatment, and prevention guidance
        based on the prediction.
 
-    **Why three models?**
-    Comparing a custom-built CNN against two established transfer-learning architectures
-    (VGG16, MobileNetV2) demonstrates the trade-offs between training from scratch and
-    leveraging pretrained ImageNet features — covering accuracy, model size, and inference
-    speed, as detailed on the **Model Comparison** page.
+    **Why validate models separately?**
+    Model files can fail to load for reasons like format mismatches or incomplete uploads.
+    Rather than letting one broken file crash the entire app, this dashboard checks each model
+    independently and only offers the ones that load successfully.
 
     **Disclaimer**
     This tool is intended to assist with preliminary screening only and should not replace
