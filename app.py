@@ -4,6 +4,7 @@ import numpy as np
 from PIL import Image
 from datetime import datetime
 import pandas as pd
+import os
 
 # ===========================================================
 # Page configuration
@@ -20,24 +21,27 @@ st.set_page_config(
 # ===========================================================
 IMAGE_SIZE = 256
 CLASS_NAMES = ['Bacteria', 'Fungi', 'Healthy', 'Nematode', 'Pest', 'Phytopthora', 'Virus']
-MODEL_PATH = "mobilenet_v2_model_v1.keras"   # <-- update if your filename differs
+MODEL_PATH = "mobilenet_v2_model_v1.keras"
+MODEL_DISPLAY_NAME = "MobileNetV2 (Transfer Learning)"
+
+# Recorded test-set results from model evaluation during development
+# (shown on the About page for context on why this model was chosen)
+MODEL_RESULTS = {
+    "Custom CNN": 54.41,
+    "VGG16": 69.28,
+    "MobileNetV2": 81.37,
+}
 
 # ===========================================================
-# Disease knowledge base: description, symptoms, causes,
-# treatment, prevention, and severity
+# Disease knowledge base
 # ===========================================================
 DISEASE_INFO = {
     "Healthy": {
-        "icon": "✅",
-        "severity": "None",
-        "severity_color": "green",
+        "icon": "✅", "severity": "None", "severity_color": "green",
         "description": "No visible signs of disease. This leaf appears healthy.",
         "symptoms": ["Uniform green colour", "No spots, lesions, or discolouration", "Normal leaf shape and texture"],
         "causes": [],
-        "treatment": [
-            "No treatment needed.",
-            "Continue routine monitoring to catch any issues early."
-        ],
+        "treatment": ["No treatment needed.", "Continue routine monitoring to catch any issues early."],
         "prevention": [
             "Maintain a consistent watering schedule (avoid overwatering).",
             "Ensure good air circulation between plants.",
@@ -46,9 +50,7 @@ DISEASE_INFO = {
         ]
     },
     "Bacteria": {
-        "icon": "🦠",
-        "severity": "High",
-        "severity_color": "red",
+        "icon": "🦠", "severity": "High", "severity_color": "red",
         "description": "Bacterial diseases are caused by bacteria entering through wounds, natural openings, or insect vectors, multiplying and spreading through plant tissue.",
         "symptoms": ["Leaf spots", "Blights", "Cankers", "Wilting", "Galls"],
         "causes": ["Bacterial pathogens surviving in soil, plant debris, or seeds", "Spread via water splash, tools, or insects"],
@@ -66,9 +68,7 @@ DISEASE_INFO = {
         ]
     },
     "Fungi": {
-        "icon": "🍄",
-        "severity": "Medium-High",
-        "severity_color": "orange",
+        "icon": "🍄", "severity": "Medium-High", "severity_color": "orange",
         "description": "Fungal diseases are among the most common plant diseases, thriving in moist and humid conditions. Fungi penetrate tissue through wounds or natural openings.",
         "symptoms": ["Leaf spots", "Rusts", "Powdery or downy mildew", "Blights", "Rot"],
         "causes": ["Fungal spores spread by wind, water, insects, or human activity", "Favoured by warm, humid conditions"],
@@ -86,16 +86,14 @@ DISEASE_INFO = {
         ]
     },
     "Nematode": {
-        "icon": "🪱",
-        "severity": "Medium",
-        "severity_color": "orange",
+        "icon": "🪱", "severity": "Medium", "severity_color": "orange",
         "description": "Nematode diseases are caused by microscopic parasitic roundworms that infest roots, reducing water and nutrient uptake.",
         "symptoms": ["Stunted growth", "Yellowing (chlorosis)", "Wilting despite adequate moisture", "Root galls or lesions"],
         "causes": ["Plant-parasitic nematodes living in soil", "Spread via contaminated soil, water, equipment, or planting material"],
         "treatment": [
             "Apply nematicides if infestation is severe (consult local agricultural extension for approved products).",
             "Solarize soil (cover with clear plastic in hot weather) to reduce nematode populations before replanting.",
-            "Remove and destroy severely infected plants.",
+            "Remove and destroy severely infected plants."
         ],
         "prevention": [
             "Rotate with non-host crops (e.g. cereals) for at least 2 seasons.",
@@ -105,9 +103,7 @@ DISEASE_INFO = {
         ]
     },
     "Pest": {
-        "icon": "🐛",
-        "severity": "Medium",
-        "severity_color": "orange",
+        "icon": "🐛", "severity": "Medium", "severity_color": "orange",
         "description": "Pest damage is caused by insect or mite infestations rather than microbial pathogens — these organisms feed on plant tissue or transmit disease.",
         "symptoms": ["Holes or shredded leaves", "Yellowing/stippling from sucking insects", "Webbing (spider mites)", "Honeydew and sooty mould"],
         "causes": ["Insects (aphids, whiteflies, beetles, caterpillars)", "Mites (e.g. spider mites)"],
@@ -125,9 +121,7 @@ DISEASE_INFO = {
         ]
     },
     "Phytopthora": {
-        "icon": "💧",
-        "severity": "Critical",
-        "severity_color": "red",
+        "icon": "💧", "severity": "Critical", "severity_color": "red",
         "description": "Phytophthora disease (Late Blight) is caused by oomycetes that spread rapidly under cool, wet, and humid conditions — it can destroy a crop within days if untreated.",
         "symptoms": ["Water-soaked lesions on leaves/stems", "Rapidly expanding dark brown/black patches", "Fuzzy white growth on leaf undersides", "Tuber rot"],
         "causes": ["Phytophthora infestans spores spread by wind, rain splash, and contaminated soil/water", "Favoured by 18–25°C and high humidity"],
@@ -146,9 +140,7 @@ DISEASE_INFO = {
         ]
     },
     "Virus": {
-        "icon": "🧬",
-        "severity": "High",
-        "severity_color": "red",
+        "icon": "🧬", "severity": "High", "severity_color": "red",
         "description": "Viral diseases are caused by plant viruses — obligate parasites that replicate only inside host cells and are typically spread by insect vectors.",
         "symptoms": ["Mosaic or mottling patterns", "Leaf curling/distortion", "Stunting", "Yellowing", "Ring spots"],
         "causes": ["Insect vectors (aphids, whiteflies, thrips)", "Contaminated tools, seed, or grafting material"],
@@ -170,11 +162,19 @@ DISEASE_INFO = {
 # ===========================================================
 # Load model (cached so it only loads once per session)
 # ===========================================================
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_model():
     return tf.keras.models.load_model(MODEL_PATH)
 
-model = load_model()
+model_load_error = None
+model = None
+if os.path.exists(MODEL_PATH):
+    try:
+        model = load_model()
+    except Exception as e:
+        model_load_error = str(e)
+else:
+    model_load_error = f"Model file '{MODEL_PATH}' not found in the app folder."
 
 # ===========================================================
 # Session state for history
@@ -203,7 +203,12 @@ st.sidebar.title("🥔 Potato Disease Detector")
 page = st.sidebar.radio("Navigate", ["🔍 Detect Disease", "📚 Disease Library", "📊 Session History", "ℹ️ About"])
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"Model classes: {', '.join(CLASS_NAMES)}")
+st.sidebar.caption(f"Model: {MODEL_DISPLAY_NAME}")
+st.sidebar.caption(f"Test accuracy: {MODEL_RESULTS['MobileNetV2']}%")
+st.sidebar.caption(f"Classes: {', '.join(CLASS_NAMES)}")
+
+if model_load_error:
+    st.sidebar.error(f"⚠️ Model not loaded: {model_load_error}")
 
 # ===========================================================
 # PAGE 1: Detect Disease
@@ -212,85 +217,88 @@ if page == "🔍 Detect Disease":
     st.title("🔍 Detect Potato Leaf Disease")
     st.write("Upload a photo of a potato leaf to identify whether it's healthy or affected by a disease, "
              "along with recommended treatment and prevention steps.")
+    st.caption(f"Powered by {MODEL_DISPLAY_NAME} — {MODEL_RESULTS['MobileNetV2']}% test accuracy")
 
-    uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
-
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-
-        col1, col2 = st.columns([1, 1.3])
-
-        with col1:
-            st.image(image, caption="Uploaded Image", use_container_width=True)
-
-        with st.spinner("Analysing leaf..."):
-            predicted_class, confidence, all_scores = predict(image)
-
-        info = DISEASE_INFO[predicted_class]
-
-        # log to history
-        st.session_state.history.append({
-            "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Prediction": predicted_class,
-            "Confidence (%)": confidence,
-            "Severity": info["severity"]
-        })
-
-        with col2:
-            st.subheader(f"{info['icon']} Prediction: {predicted_class}")
-
-            if predicted_class == "Healthy":
-                st.success(f"**Confidence: {confidence}%**")
-            else:
-                st.error(f"**Confidence: {confidence}%**  |  Severity: **{info['severity']}**")
-
-            st.write(info["description"])
-
-            st.markdown("**Confidence breakdown across all classes**")
-            df_scores = pd.DataFrame({"Class": list(all_scores.keys()), "Confidence (%)": list(all_scores.values())})
-            st.bar_chart(df_scores.set_index("Class"))
-
-        st.markdown("---")
-
-        # Detailed results in tabs
-        tab1, tab2, tab3 = st.tabs(["🩺 Symptoms & Causes", "💊 Treatment", "🛡️ Prevention"])
-
-        with tab1:
-            if info["symptoms"]:
-                st.markdown("**Common symptoms:**")
-                for s in info["symptoms"]:
-                    st.markdown(f"- {s}")
-            if info["causes"]:
-                st.markdown("**Causes:**")
-                for c in info["causes"]:
-                    st.markdown(f"- {c}")
-            if not info["symptoms"] and not info["causes"]:
-                st.write("No disease symptoms detected.")
-
-        with tab2:
-            st.markdown("**Recommended actions:**")
-            for t in info["treatment"]:
-                st.markdown(f"- {t}")
-
-        with tab3:
-            st.markdown("**How to prevent this in future:**")
-            for p in info["prevention"]:
-                st.markdown(f"- {p}")
-
-        if predicted_class != "Healthy":
-            st.warning("⚠️ This prediction is for guidance only. For confirmed diagnosis and treatment, "
-                       "consult a local agricultural extension officer or plant pathologist.")
-
+    if model_load_error:
+        st.error(f"The model could not be loaded: {model_load_error}\n\n"
+                 f"Make sure `{MODEL_PATH}` is present in the app folder.")
     else:
-        st.info("👆 Upload an image to get started.")
+        uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
 
-        with st.expander("💡 Tips for best results"):
-            st.markdown("""
-            - Use a clear, well-lit photo of a single leaf.
-            - Avoid heavy shadows or blur.
-            - Fill most of the frame with the leaf.
-            - Photograph both sides of the leaf if symptoms are unclear on one side.
-            """)
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+
+            col1, col2 = st.columns([1, 1.3])
+
+            with col1:
+                st.image(image, caption="Uploaded Image", use_container_width=True)
+
+            with st.spinner("Analysing leaf..."):
+                predicted_class, confidence, all_scores = predict(image)
+
+            info = DISEASE_INFO[predicted_class]
+
+            st.session_state.history.append({
+                "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Prediction": predicted_class,
+                "Confidence (%)": confidence,
+                "Severity": info["severity"]
+            })
+
+            with col2:
+                st.subheader(f"{info['icon']} Prediction: {predicted_class}")
+
+                if predicted_class == "Healthy":
+                    st.success(f"**Confidence: {confidence}%**")
+                else:
+                    st.error(f"**Confidence: {confidence}%**  |  Severity: **{info['severity']}**")
+
+                st.write(info["description"])
+
+                st.markdown("**Confidence breakdown across all classes**")
+                df_scores = pd.DataFrame({"Class": list(all_scores.keys()), "Confidence (%)": list(all_scores.values())})
+                st.bar_chart(df_scores.set_index("Class"))
+
+            st.markdown("---")
+
+            tab1, tab2, tab3 = st.tabs(["🩺 Symptoms & Causes", "💊 Treatment", "🛡️ Prevention"])
+
+            with tab1:
+                if info["symptoms"]:
+                    st.markdown("**Common symptoms:**")
+                    for s in info["symptoms"]:
+                        st.markdown(f"- {s}")
+                if info["causes"]:
+                    st.markdown("**Causes:**")
+                    for c in info["causes"]:
+                        st.markdown(f"- {c}")
+                if not info["symptoms"] and not info["causes"]:
+                    st.write("No disease symptoms detected.")
+
+            with tab2:
+                st.markdown("**Recommended actions:**")
+                for t in info["treatment"]:
+                    st.markdown(f"- {t}")
+
+            with tab3:
+                st.markdown("**How to prevent this in future:**")
+                for p in info["prevention"]:
+                    st.markdown(f"- {p}")
+
+            if predicted_class != "Healthy":
+                st.warning("⚠️ This prediction is for guidance only. For confirmed diagnosis and treatment, "
+                           "consult a local agricultural extension officer or plant pathologist.")
+
+        else:
+            st.info("👆 Upload an image to get started.")
+
+            with st.expander("💡 Tips for best results"):
+                st.markdown("""
+                - Use a clear, well-lit photo of a single leaf.
+                - Avoid heavy shadows or blur.
+                - Fill most of the frame with the leaf.
+                - Photograph both sides of the leaf if symptoms are unclear on one side.
+                """)
 
 # ===========================================================
 # PAGE 2: Disease Library
@@ -353,17 +361,34 @@ elif page == "📊 Session History":
 # ===========================================================
 elif page == "ℹ️ About":
     st.title("ℹ️ About this project")
-    st.markdown("""
-    This dashboard uses a Convolutional Neural Network (CNN) trained with TensorFlow/Keras
-    to classify potato leaf images into **7 categories**: Bacteria, Fungi, Healthy, Nematode,
-    Pest, Phytophthora, and Virus.
+    st.markdown(f"""
+    This dashboard uses a **{MODEL_DISPLAY_NAME}** Convolutional Neural Network, trained with
+    TensorFlow/Keras, to classify potato leaf images into **7 categories**: Bacteria, Fungi,
+    Healthy, Nematode, Pest, Phytophthora, and Virus.
 
     **How it works**
     1. Upload a photo of a potato leaf.
-    2. The image is resized to 256×256 pixels and passed through the trained CNN.
+    2. The image is resized to 256×256 pixels and passed through the trained model.
     3. The model outputs a predicted class along with a confidence score.
     4. The dashboard provides relevant symptoms, causes, treatment, and prevention guidance
        based on the prediction.
+
+    **Why MobileNetV2?**
+    Three architectures were evaluated on the same test set during development:
+    """)
+
+    results_df = pd.DataFrame({
+        "Model": list(MODEL_RESULTS.keys()),
+        "Test Accuracy (%)": list(MODEL_RESULTS.values())
+    }).set_index("Model")
+
+    st.bar_chart(results_df)
+    st.dataframe(results_df, use_container_width=True)
+
+    st.markdown("""
+    MobileNetV2 achieved the highest test accuracy while remaining lightweight enough for fast,
+    responsive predictions in this dashboard — making it the clear choice for deployment over the
+    Custom CNN and VGG16 alternatives.
 
     **Disclaimer**
     This tool is intended to assist with preliminary screening only and should not replace
